@@ -5,6 +5,7 @@ using System.IO;
 using System.Threading.Tasks;
 using GLTFast;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 using Unity.AI.Navigation;
 
@@ -21,9 +22,11 @@ public class MansionSceneBuilder : MonoBehaviour
 
     [Header("Runtime")]
     public bool buildNavMesh = true;
+    public bool addObjectColliders = true;
     public FloorManager floorManager;
     public bool useSemanticProxyFallback = true;
     public bool skipDoorwayPlaceholders = true;
+    public bool enforceDoorClearance = true;
     public bool logFurnitureStats = true;
 
     private readonly Dictionary<int, GameObject> floors = new();
@@ -115,19 +118,28 @@ public class MansionSceneBuilder : MonoBehaviour
 
             if (data.walls != null)
             {
+                Dictionary<string, WallData> wallById = new();
+                foreach (WallData wall in data.walls)
+                {
+                    if (!string.IsNullOrEmpty(wall?.id))
+                    {
+                        wallById[wall.id] = wall;
+                    }
+                }
+
                 // Build wall-to-doors lookup
                 Dictionary<string, List<DoorCutter.HoleRect>> wallDoors = new();
                 if (data.doors != null)
                 {
                     foreach (DoorData door in data.doors)
                     {
-                        DoorCutter.HoleRect hole = DoorCutter.DoorToHoleRect(door);
-                        foreach (string wallId in new[] { door.wall0, door.wall1 })
+                        DoorCutter.HoleRect hole0 = DoorCutter.DoorToHoleRect(door);
+                        AddDoorHole(wallDoors, wallById, door.wall0, hole0);
+
+                        if (!string.IsNullOrEmpty(door.wall1) && wallById.TryGetValue(door.wall1, out WallData wall1))
                         {
-                            if (string.IsNullOrEmpty(wallId)) continue;
-                            if (!wallDoors.ContainsKey(wallId))
-                                wallDoors[wallId] = new List<DoorCutter.HoleRect>();
-                            wallDoors[wallId].Add(hole);
+                            DoorCutter.HoleRect mirrored = MirrorHoleRectForOppositeWall(hole0, wall1.width);
+                            AddDoorHole(wallDoors, wallById, door.wall1, mirrored);
                         }
                     }
                 }
@@ -145,9 +157,11 @@ public class MansionSceneBuilder : MonoBehaviour
                 }
             }
 
+            List<Bounds> doorClearanceBounds = BuildDoorClearanceBounds(data.doors, root.transform.position);
+
             if (data.objects != null)
             {
-                await LoadFurniture(data.objects, root.transform, num);
+                await LoadFurniture(data.objects, root.transform, num, doorClearanceBounds);
             }
 
             if (buildNavMesh)
@@ -169,6 +183,41 @@ public class MansionSceneBuilder : MonoBehaviour
         }
 
         Debug.Log($"Loaded {floors.Count} floors from {basePath}");
+    }
+
+    private static void AddDoorHole(
+        Dictionary<string, List<DoorCutter.HoleRect>> wallDoors,
+        Dictionary<string, WallData> wallById,
+        string wallId,
+        DoorCutter.HoleRect hole)
+    {
+        if (string.IsNullOrEmpty(wallId) || !wallById.ContainsKey(wallId))
+        {
+            return;
+        }
+
+        if (!wallDoors.ContainsKey(wallId))
+        {
+            wallDoors[wallId] = new List<DoorCutter.HoleRect>();
+        }
+
+        wallDoors[wallId].Add(hole);
+    }
+
+    private static DoorCutter.HoleRect MirrorHoleRectForOppositeWall(DoorCutter.HoleRect hole, float wallWidth)
+    {
+        if (wallWidth <= 0f)
+        {
+            return hole;
+        }
+
+        return new DoorCutter.HoleRect
+        {
+            uMin = Mathf.Max(0f, wallWidth - hole.uMax),
+            uMax = Mathf.Min(wallWidth, wallWidth - hole.uMin),
+            vMin = hole.vMin,
+            vMax = hole.vMax,
+        };
     }
 
     private void BuildFloorMesh(RoomData room, Transform parent)
@@ -291,7 +340,7 @@ public class MansionSceneBuilder : MonoBehaviour
         }
     }
 
-    private async Task LoadFurniture(List<ObjectPlacement> objects, Transform parent, int floorNumber)
+    private async Task LoadFurniture(List<ObjectPlacement> objects, Transform parent, int floorNumber, List<Bounds> doorClearanceBounds)
     {
         string assetRoot = Path.Combine(Application.streamingAssetsPath, "ObjathorAssets");
         int glbLoaded = 0;
@@ -299,6 +348,7 @@ public class MansionSceneBuilder : MonoBehaviour
         int proxyLoaded = 0;
         int placeholderLoaded = 0;
         int skipped = 0;
+        int clearanceRejected = 0;
 
         foreach (ObjectPlacement obj in objects)
         {
@@ -322,6 +372,13 @@ public class MansionSceneBuilder : MonoBehaviour
                 if (go != null)
                 {
                     ApplyObjectTransform(go, obj, parent);
+                    if (IntersectsDoorClearance(go, doorClearanceBounds))
+                    {
+                        Destroy(go);
+                        clearanceRejected++;
+                        continue;
+                    }
+                    EnsureMeshColliders(go);
                     glbLoaded++;
                     continue;
                 }
@@ -333,6 +390,13 @@ public class MansionSceneBuilder : MonoBehaviour
                 if (go != null)
                 {
                     ApplyObjectTransform(go, obj, parent, extraYRotation: GetYRotOffset(obj.assetId));
+                    if (IntersectsDoorClearance(go, doorClearanceBounds))
+                    {
+                        Destroy(go);
+                        clearanceRejected++;
+                        continue;
+                    }
+                    EnsureMeshColliders(go);
                     convertedLoaded++;
                     continue;
                 }
@@ -344,6 +408,12 @@ public class MansionSceneBuilder : MonoBehaviour
                 if (proxy != null)
                 {
                     ApplyObjectTransform(proxy, obj, parent);
+                    if (IntersectsDoorClearance(proxy, doorClearanceBounds))
+                    {
+                        Destroy(proxy);
+                        clearanceRejected++;
+                        continue;
+                    }
                     proxyLoaded++;
                     continue;
                 }
@@ -353,12 +423,18 @@ public class MansionSceneBuilder : MonoBehaviour
             placeholder.transform.localScale = Vector3.one * 0.3f;
             placeholder.GetComponent<MeshRenderer>().sharedMaterial = ProxyDarkMaterial();
             ApplyObjectTransform(placeholder, obj, parent);
+            if (IntersectsDoorClearance(placeholder, doorClearanceBounds))
+            {
+                Destroy(placeholder);
+                clearanceRejected++;
+                continue;
+            }
             placeholderLoaded++;
         }
 
         if (logFurnitureStats)
         {
-            Debug.Log($"Floor {floorNumber}: GLB={glbLoaded}, Converted={convertedLoaded}, Proxy={proxyLoaded}, Placeholder={placeholderLoaded}, Skipped={skipped}");
+            Debug.Log($"Floor {floorNumber}: GLB={glbLoaded}, Converted={convertedLoaded}, Proxy={proxyLoaded}, Placeholder={placeholderLoaded}, Skipped={skipped}, DoorClearanceRejected={clearanceRejected}");
         }
     }
 
@@ -707,8 +783,159 @@ public class MansionSceneBuilder : MonoBehaviour
         child.transform.localScale = localScale;
         MeshRenderer renderer = child.GetComponent<MeshRenderer>();
         renderer.sharedMaterial = material;
-        Destroy(child.GetComponent<Collider>());
         return child;
+    }
+
+    private void EnsureMeshColliders(GameObject go)
+    {
+        if (!addObjectColliders || go == null)
+        {
+            return;
+        }
+
+        MeshFilter[] filters = go.GetComponentsInChildren<MeshFilter>(true);
+        foreach (MeshFilter filter in filters)
+        {
+            if (filter.sharedMesh == null)
+            {
+                continue;
+            }
+
+            MeshCollider collider = filter.GetComponent<MeshCollider>();
+            if (collider == null)
+            {
+                collider = filter.gameObject.AddComponent<MeshCollider>();
+            }
+
+            collider.sharedMesh = filter.sharedMesh;
+        }
+    }
+
+    private List<Bounds> BuildDoorClearanceBounds(List<DoorData> doors, Vector3 floorWorldOffset)
+    {
+        List<Bounds> bounds = new();
+        if (!enforceDoorClearance || doors == null)
+        {
+            return bounds;
+        }
+
+        foreach (DoorData door in doors)
+        {
+            Bounds? doorBounds = TryBuildDoorClearanceBounds(door, floorWorldOffset);
+            if (doorBounds.HasValue)
+            {
+                bounds.Add(doorBounds.Value);
+            }
+        }
+
+        return bounds;
+    }
+
+    private Bounds? TryBuildDoorClearanceBounds(DoorData door, Vector3 floorWorldOffset)
+    {
+        if (door?.doorBoxes is not JArray doorBoxes || doorBoxes.Count == 0)
+        {
+            return null;
+        }
+
+        bool hasPoint = false;
+        float minX = float.PositiveInfinity;
+        float maxX = float.NegativeInfinity;
+        float minZ = float.PositiveInfinity;
+        float maxZ = float.NegativeInfinity;
+
+        foreach (JToken box in doorBoxes)
+        {
+            if (box is not JArray poly)
+            {
+                continue;
+            }
+
+            foreach (JToken point in poly)
+            {
+                if (point is not JArray pair || pair.Count < 2)
+                {
+                    continue;
+                }
+
+                float x = pair[0]?.Value<float>() ?? 0f;
+                float z = pair[1]?.Value<float>() ?? 0f;
+                minX = Mathf.Min(minX, x);
+                maxX = Mathf.Max(maxX, x);
+                minZ = Mathf.Min(minZ, z);
+                maxZ = Mathf.Max(maxZ, z);
+                hasPoint = true;
+            }
+        }
+
+        if (!hasPoint)
+        {
+            return null;
+        }
+
+        const float horizontalPadding = 0.35f;
+        const float depthPadding = 0.45f;
+        const float clearanceHeight = 2.2f;
+
+        minX -= horizontalPadding;
+        maxX += horizontalPadding;
+        minZ -= depthPadding;
+        maxZ += depthPadding;
+
+        Vector3 worldMin = new(minX, floorWorldOffset.y, minZ);
+        Vector3 worldMax = new(maxX, floorWorldOffset.y + clearanceHeight, maxZ);
+        worldMin += new Vector3(floorWorldOffset.x, 0f, floorWorldOffset.z);
+        worldMax += new Vector3(floorWorldOffset.x, 0f, floorWorldOffset.z);
+
+        Bounds bounds = new();
+        bounds.SetMinMax(worldMin, worldMax);
+        return bounds;
+    }
+
+    private bool IntersectsDoorClearance(GameObject go, List<Bounds> doorClearanceBounds)
+    {
+        if (!enforceDoorClearance || go == null || doorClearanceBounds == null || doorClearanceBounds.Count == 0)
+        {
+            return false;
+        }
+
+        if (!TryGetWorldBounds(go, out Bounds objectBounds))
+        {
+            return false;
+        }
+
+        foreach (Bounds doorBounds in doorClearanceBounds)
+        {
+            if (doorBounds.Intersects(objectBounds))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryGetWorldBounds(GameObject go, out Bounds bounds)
+    {
+        Renderer[] renderers = go.GetComponentsInChildren<Renderer>(true);
+        bool hasBounds = false;
+        bounds = default;
+
+        foreach (Renderer renderer in renderers)
+        {
+            if (!hasBounds)
+            {
+                bounds = renderer.bounds;
+                hasBounds = true;
+            }
+            else
+            {
+                bounds.Encapsulate(renderer.bounds.min);
+                bounds.Encapsulate(renderer.bounds.max);
+            }
+        }
+
+        return hasBounds;
     }
 
     private float EstimateLocalModelCenterY(GameObject go)
