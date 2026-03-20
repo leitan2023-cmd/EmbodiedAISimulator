@@ -9,7 +9,7 @@ public class FloorData
     public List<WallData> walls;
     public List<RoomData> rooms;
     public List<ObjectPlacement> objects;
-    public JToken doors;
+    public List<DoorData> doors;
     public JToken windows;
     public JToken proceduralParameters;
 
@@ -86,6 +86,23 @@ public class ObjectPlacement
     public Vec3 rotation;
     public JToken material;
     public JToken vertices;
+}
+
+[Serializable]
+public class DoorData
+{
+    public string assetId;
+    public string id;
+    public bool openable;
+    public float openness;
+    public string room0;
+    public string room1;
+    public string wall0;
+    public string wall1;
+    public List<Vec3> holePolygon;
+    public Vec3 assetPosition;
+    public JToken doorBoxes;
+    public List<List<float>> doorSegment;
 }
 
 [Serializable]

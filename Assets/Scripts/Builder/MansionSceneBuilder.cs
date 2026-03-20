@@ -29,6 +29,7 @@ public class MansionSceneBuilder : MonoBehaviour
     private readonly Dictionary<int, GameObject> floors = new();
     private readonly Dictionary<string, Mesh> meshCache = new();
     private readonly Dictionary<string, Material> materialCache = new();
+    private readonly Dictionary<string, ObjathorMeshData> meshDataCache = new();
     private Material proxyWoodMaterial;
     private Material proxyMetalMaterial;
     private Material proxySoftMaterial;
@@ -36,6 +37,31 @@ public class MansionSceneBuilder : MonoBehaviour
     private Material proxyLightMaterial;
 
     private async void Start()
+    {
+        await LoadBuilding();
+    }
+
+    /// <summary>
+    /// Destroy existing scene and rebuild from a new building folder.
+    /// Called by SceneOrchestrator for dynamic scene generation.
+    /// </summary>
+    public async Task RebuildFromFolder(string newBuildingFolder)
+    {
+        // Destroy existing floors
+        foreach (var kv in floors)
+        {
+            if (kv.Value != null) Destroy(kv.Value);
+        }
+        floors.Clear();
+        meshCache.Clear();
+        materialCache.Clear();
+        meshDataCache.Clear();
+
+        buildingFolder = newBuildingFolder;
+        await LoadBuilding();
+    }
+
+    private async Task LoadBuilding()
     {
         string basePath = Path.Combine(Application.streamingAssetsPath, "Buildings", buildingFolder);
         if (!Directory.Exists(basePath))
@@ -89,9 +115,33 @@ public class MansionSceneBuilder : MonoBehaviour
 
             if (data.walls != null)
             {
+                // Build wall-to-doors lookup
+                Dictionary<string, List<DoorCutter.HoleRect>> wallDoors = new();
+                if (data.doors != null)
+                {
+                    foreach (DoorData door in data.doors)
+                    {
+                        DoorCutter.HoleRect hole = DoorCutter.DoorToHoleRect(door);
+                        foreach (string wallId in new[] { door.wall0, door.wall1 })
+                        {
+                            if (string.IsNullOrEmpty(wallId)) continue;
+                            if (!wallDoors.ContainsKey(wallId))
+                                wallDoors[wallId] = new List<DoorCutter.HoleRect>();
+                            wallDoors[wallId].Add(hole);
+                        }
+                    }
+                }
+
                 foreach (WallData wall in data.walls)
                 {
-                    BuildWallMesh(wall, root.transform);
+                    if (wallDoors.TryGetValue(wall.id, out List<DoorCutter.HoleRect> holes))
+                    {
+                        BuildWallMeshWithDoors(wall, holes, root.transform);
+                    }
+                    else
+                    {
+                        BuildWallMesh(wall, root.transform);
+                    }
                 }
             }
 
@@ -147,6 +197,9 @@ public class MansionSceneBuilder : MonoBehaviour
 
         MeshRenderer renderer = go.AddComponent<MeshRenderer>();
         renderer.sharedMaterial = floorMat != null ? floorMat : DefaultFloorMaterial();
+
+        MeshCollider floorCollider = go.AddComponent<MeshCollider>();
+        floorCollider.sharedMesh = mesh;
     }
 
     private void BuildWallMesh(WallData wall, Transform parent)
@@ -177,6 +230,65 @@ public class MansionSceneBuilder : MonoBehaviour
 
         MeshRenderer renderer = go.AddComponent<MeshRenderer>();
         renderer.sharedMaterial = wallMat != null ? wallMat : DefaultWallMaterial();
+
+        // BoxCollider with thickness — MeshCollider on zero-thickness quads is unreliable
+        AddWallBoxCollider(go, vertices[0], vertices[1], vertices[2], vertices[3]);
+    }
+
+    /// <summary>
+    /// Add a BoxCollider to a wall segment using a rotated child GameObject.
+    /// Vertices: TL(0), TR(1), BR(2), BL(3) in parent-local space.
+    /// </summary>
+    private static void AddWallBoxCollider(GameObject wallGO, Vector3 tl, Vector3 tr, Vector3 br, Vector3 bl)
+    {
+        Vector3 wallRight = br - bl;
+        Vector3 wallUp = tl - bl;
+        float width = wallRight.magnitude;
+        float height = wallUp.magnitude;
+
+        if (width < 0.01f || height < 0.01f) return;
+
+        Vector3 wallNormal = Vector3.Cross(wallRight.normalized, wallUp.normalized).normalized;
+        Vector3 center = (tl + tr + br + bl) * 0.25f;
+
+        GameObject col = new("Collider");
+        col.transform.SetParent(wallGO.transform, false);
+        col.transform.localPosition = center;
+        col.transform.localRotation = Quaternion.LookRotation(wallNormal, wallUp.normalized);
+
+        BoxCollider box = col.AddComponent<BoxCollider>();
+        box.center = Vector3.zero;
+        box.size = new Vector3(width, height, 0.15f);
+    }
+
+    private void BuildWallMeshWithDoors(WallData wall, List<DoorCutter.HoleRect> holes, Transform parent)
+    {
+        List<Mesh> segments = DoorCutter.CutWall(wall, holes);
+        if (segments.Count == 0) return;
+
+        GameObject wallRoot = new($"Wall_{wall.id}");
+        wallRoot.transform.SetParent(parent, false);
+        Material mat = wallMat != null ? wallMat : DefaultWallMaterial();
+
+        for (int i = 0; i < segments.Count; i++)
+        {
+            Mesh mesh = segments[i];
+            mesh.name = $"WallSeg_{wall.id}_{i}";
+            GameObject go = new($"WallSeg_{i}");
+            go.transform.SetParent(wallRoot.transform, false);
+            MeshFilter filter = go.AddComponent<MeshFilter>();
+            filter.sharedMesh = mesh;
+            MeshRenderer renderer = go.AddComponent<MeshRenderer>();
+            renderer.sharedMaterial = mat;
+
+            // BoxCollider from mesh vertices (each segment is a quad: 4 vertices)
+            Vector3[] verts = mesh.vertices;
+            if (verts.Length >= 4)
+            {
+                // BuildQuad outputs: v0=BL, v1=BR, v2=TR, v3=TL
+                AddWallBoxCollider(go, verts[3], verts[2], verts[1], verts[0]);
+            }
+        }
     }
 
     private async Task LoadFurniture(List<ObjectPlacement> objects, Transform parent, int floorNumber)
@@ -220,7 +332,7 @@ public class MansionSceneBuilder : MonoBehaviour
                 GameObject go = LoadConvertedObjathorMesh(meshJsonPath, obj.assetId);
                 if (go != null)
                 {
-                    ApplyObjectTransform(go, obj, parent, extraYRotation: GetYRotOffset(meshJsonPath));
+                    ApplyObjectTransform(go, obj, parent, extraYRotation: GetYRotOffset(obj.assetId));
                     convertedLoaded++;
                     continue;
                 }
@@ -287,22 +399,27 @@ public class MansionSceneBuilder : MonoBehaviour
 
     private GameObject LoadConvertedObjathorMesh(string path, string assetId)
     {
+        // Read and cache the raw mesh data once (avoids triple gzip decompression)
+        if (!meshDataCache.TryGetValue(assetId, out ObjathorMeshData cachedData))
+        {
+            cachedData = ReadMeshData(path);
+            meshDataCache[assetId] = cachedData;
+        }
+
+        if (cachedData == null || cachedData.vertices == null || cachedData.triangles == null)
+        {
+            return null;
+        }
+
         if (!meshCache.TryGetValue(assetId, out Mesh mesh) || mesh == null)
         {
-            ObjathorMeshData data = ReadMeshData(path);
-            if (data == null || data.vertices == null || data.triangles == null)
-            {
-                return null;
-            }
-
-            mesh = BuildMesh(data);
+            mesh = BuildMesh(cachedData);
             meshCache[assetId] = mesh;
         }
 
         if (!materialCache.TryGetValue(assetId, out Material material) || material == null)
         {
-            ObjathorMeshData data = ReadMeshData(path);
-            material = BuildMaterial(data, Path.GetDirectoryName(path));
+            material = BuildMaterial(cachedData, Path.GetDirectoryName(path));
             materialCache[assetId] = material;
         }
 
@@ -323,10 +440,13 @@ public class MansionSceneBuilder : MonoBehaviour
         return JsonConvert.DeserializeObject<ObjathorMeshData>(json);
     }
 
-    private float GetYRotOffset(string path)
+    private float GetYRotOffset(string assetId)
     {
-        ObjathorMeshData data = ReadMeshData(path);
-        return data?.yRotOffset ?? 0f;
+        if (meshDataCache.TryGetValue(assetId, out ObjathorMeshData data))
+        {
+            return data?.yRotOffset ?? 0f;
+        }
+        return 0f;
     }
 
     private Mesh BuildMesh(ObjathorMeshData data)
