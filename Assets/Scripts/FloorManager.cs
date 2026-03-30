@@ -9,7 +9,7 @@ public class FloorManager : MonoBehaviour
 
     public void SetFloors(Dictionary<int, GameObject> newFloors, int initial)
     {
-        floors = newFloors ?? new Dictionary<int, GameObject>();
+        floors = newFloors != null ? new Dictionary<int, GameObject>(newFloors) : new Dictionary<int, GameObject>();
         currentFloor = initial;
 
         foreach (KeyValuePair<int, GameObject> pair in floors)

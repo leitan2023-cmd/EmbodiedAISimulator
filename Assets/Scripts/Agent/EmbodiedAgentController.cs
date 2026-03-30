@@ -65,6 +65,9 @@ public class EmbodiedAgentController : MonoBehaviour
             if (depthT != null) depthCamera = depthT.GetComponent<Camera>();
         }
 
+        // Disable auto-rendering on both cameras — we render manually in CaptureCamera()
+        if (rgbCamera != null) rgbCamera.enabled = false;
+
         InitRenderTextures();
         ConfigureDepthCamera();
     }
@@ -151,11 +154,15 @@ public class EmbodiedAgentController : MonoBehaviour
         Shader depthShader = Shader.Find("Hidden/EmbodiedAI/LinearDepth");
         if (depthShader != null)
         {
+            // NOTE: SetReplacementShader is a Built-in RP feature and does NOT work in URP.
+            // In URP, this call is silently ignored — the depth camera will render normal RGB.
+            // TODO: Replace with a ScriptableRendererFeature or CommandBuffer material override for proper URP depth capture.
             depthCamera.SetReplacementShader(depthShader, "RenderType");
+            Debug.LogWarning("[Agent] SetReplacementShader does not work in URP. Depth capture will produce RGB instead of depth. Use a ScriptableRendererFeature for proper depth in URP.");
         }
         else
         {
-            Debug.LogWarning("EmbodiedAgent: LinearDepth shader not found. Depth capture will use default rendering.");
+            Debug.LogWarning("[Agent] LinearDepth shader not found. Depth capture will use default rendering.");
         }
 
         depthCamera.farClipPlane = depthFar;
