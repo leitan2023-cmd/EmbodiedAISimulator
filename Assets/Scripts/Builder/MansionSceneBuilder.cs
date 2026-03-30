@@ -38,10 +38,19 @@ public class MansionSceneBuilder : MonoBehaviour
     private Material proxySoftMaterial;
     private Material proxyDarkMaterial;
     private Material proxyLightMaterial;
+    private Material defaultWallMaterial;
+    private Material defaultFloorMaterial;
 
     private async void Start()
     {
-        await LoadBuilding();
+        try
+        {
+            await LoadBuilding();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[MansionSceneBuilder] Failed to load building: {ex}");
+        }
     }
 
     /// <summary>
@@ -59,6 +68,8 @@ public class MansionSceneBuilder : MonoBehaviour
         meshCache.Clear();
         materialCache.Clear();
         meshDataCache.Clear();
+        defaultWallMaterial = null;
+        defaultFloorMaterial = null;
 
         buildingFolder = newBuildingFolder;
         await LoadBuilding();
@@ -267,7 +278,7 @@ public class MansionSceneBuilder : MonoBehaviour
         Mesh mesh = new() { name = $"WallMesh_{wall.id}" };
         Vector3[] quad = { vertices[0], vertices[1], vertices[2], vertices[3] };
         mesh.vertices = quad;
-        mesh.triangles = new[] { 0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0 };
+        mesh.triangles = new[] { 0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0 }; // double-sided
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
 
@@ -442,7 +453,7 @@ public class MansionSceneBuilder : MonoBehaviour
     {
         byte[] data = File.ReadAllBytes(path);
         GltfImport gltf = new();
-        bool ok = await gltf.Load(data, new Uri(path));
+        bool ok = await gltf.LoadGltfBinary(data, new Uri(path));
         if (!ok)
         {
             Debug.LogWarning($"Failed to load GLB: {path}");
@@ -1060,15 +1071,21 @@ public class MansionSceneBuilder : MonoBehaviour
 
     private Material DefaultWallMaterial()
     {
-        Material material = new(Shader.Find("Universal Render Pipeline/Lit"));
-        material.color = new Color(0.82f, 0.82f, 0.82f, 1f);
-        return material;
+        if (defaultWallMaterial == null)
+        {
+            defaultWallMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+            defaultWallMaterial.color = new Color(0.82f, 0.82f, 0.82f, 1f);
+        }
+        return defaultWallMaterial;
     }
 
     private Material DefaultFloorMaterial()
     {
-        Material material = new(Shader.Find("Universal Render Pipeline/Lit"));
-        material.color = new Color(0.55f, 0.45f, 0.32f, 1f);
-        return material;
+        if (defaultFloorMaterial == null)
+        {
+            defaultFloorMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+            defaultFloorMaterial.color = new Color(0.55f, 0.45f, 0.32f, 1f);
+        }
+        return defaultFloorMaterial;
     }
 }

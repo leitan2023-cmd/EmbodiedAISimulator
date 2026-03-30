@@ -11,6 +11,8 @@ public class SimpleFPSCamera : MonoBehaviour
     private float rotY;
     private CharacterController characterController;
 
+    private bool activated;
+
     private void Start()
     {
         characterController = GetComponent<CharacterController>();
@@ -27,12 +29,28 @@ public class SimpleFPSCamera : MonoBehaviour
         Vector3 angles = transform.rotation.eulerAngles;
         rotX = angles.x;
         rotY = angles.y;
-        Cursor.lockState = CursorLockMode.Locked;
-        Cursor.visible = false;
     }
 
     private void Update()
     {
+        // Right-click to activate free camera; Escape to deactivate.
+        // This prevents input conflicts with EmbodiedAgentController (WASD/QE).
+        if (Input.GetMouseButtonDown(1))
+        {
+            activated = true;
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+        }
+
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            activated = false;
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+        }
+
+        if (!activated) return;
+
         float h = Input.GetAxis("Horizontal");
         float v = Input.GetAxis("Vertical");
         float upDown = 0f;
@@ -55,11 +73,5 @@ public class SimpleFPSCamera : MonoBehaviour
         rotY += Input.GetAxis("Mouse X") * lookSpeed;
         rotX = Mathf.Clamp(rotX, -80f, 80f);
         transform.rotation = Quaternion.Euler(rotX, rotY, 0f);
-
-        if (Input.GetKeyDown(KeyCode.Escape))
-        {
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
-        }
     }
 }
